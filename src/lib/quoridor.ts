@@ -1,145 +1,362 @@
-'use client';
+export const BOARD_SIZE = 9 as const;
+export const WALLS_PER_PLAYER = 10 as const;
 
-import { useMemo, useState } from 'react';
-import {
-  BOARD_SIZE,
-  createInitialGameState,
-  getLegalMoves,
-  isWallPlacementLegal,
-  submitPlayerAction
-} from '@/lib/quoridor';
+export type PlayerId = 'player1' | 'player2';
+export type Orientation = 'horizontal' | 'vertical';
+export type GameStatus = 'playing' | 'finished';
 
-export default function HomePage() {
-  const [game, setGame] = useState(createInitialGameState());
-  const [orientation, setOrientation] = useState<'horizontal' | 'vertical'>('horizontal');
+export type Cell = {
+  row: number;
+  col: number;
+};
 
-  const legalMoves = useMemo(() => getLegalMoves(game, game.currentPlayer), [game]);
+export type WallPlacement = {
+  row: number;
+  col: number;
+  orientation: Orientation;
+};
 
-  const handleCellClick = (row: number, col: number) => {
-    const legalTarget = legalMoves.some((cell) => cell.row === row && cell.col === col);
+export type Move =
+  | { type: 'move'; player: PlayerId; from: Cell; to: Cell }
+  | { type: 'wall'; player: PlayerId; wall: WallPlacement }
+  | { type: 'resign'; player: PlayerId };
 
-    if (legalTarget) {
-      const next = submitPlayerAction(game, {
-        player: game.currentPlayer,
-        type: 'move',
-        to: { row, col }
-      });
-      setGame(next);
-      return;
+export type PlayerState = {
+  id: PlayerId;
+  name: string;
+  color: 'white' | 'black';
+  pawn: Cell;
+  goalRow: number;
+  wallsRemaining: number;
+};
+
+export type GameState = {
+  boardSize: number;
+  status: GameStatus;
+  winner: PlayerId | null;
+  currentPlayer: PlayerId;
+  version: number;
+  turnNumber: number;
+  players: Record<PlayerId, PlayerState>;
+  walls: WallPlacement[];
+  moveHistory: Move[];
+};
+
+export type MoveAction =
+  | { type: 'move'; player: PlayerId; to: Cell }
+  | { type: 'wall'; player: PlayerId; wall: WallPlacement }
+  | { type: 'resign'; player: PlayerId };
+
+const STARTING_POSITIONS: Record<PlayerId, Cell> = {
+  player1: { row: BOARD_SIZE - 1, col: Math.floor(BOARD_SIZE / 2) },
+  player2: { row: 0, col: Math.floor(BOARD_SIZE / 2) }
+};
+
+const DIRECTIONS: ReadonlyArray<Cell> = [
+  { row: -1, col: 0 },
+  { row: 1, col: 0 },
+  { row: 0, col: -1 },
+  { row: 0, col: 1 }
+];
+
+export function createInitialGameState(): GameState {
+  return {
+    boardSize: BOARD_SIZE,
+    status: 'playing',
+    winner: null,
+    currentPlayer: 'player1',
+    version: 1,
+    turnNumber: 1,
+    players: {
+      player1: {
+        id: 'player1',
+        name: 'Player 1',
+        color: 'white',
+        pawn: { ...STARTING_POSITIONS.player1 },
+        goalRow: 0,
+        wallsRemaining: WALLS_PER_PLAYER
+      },
+      player2: {
+        id: 'player2',
+        name: 'Player 2',
+        color: 'black',
+        pawn: { ...STARTING_POSITIONS.player2 },
+        goalRow: BOARD_SIZE - 1,
+        wallsRemaining: WALLS_PER_PLAYER
+      }
+    },
+    walls: [],
+    moveHistory: []
+  };
+}
+
+export function getOpponent(player: PlayerId): PlayerId {
+  return player === 'player1' ? 'player2' : 'player1';
+}
+
+export function isInsideBoard(cell: Cell, boardSize = BOARD_SIZE): boolean {
+  return cell.row >= 0 && cell.row < boardSize && cell.col >= 0 && cell.col < boardSize;
+}
+
+function isSameCell(a: Cell, b: Cell): boolean {
+  return a.row === b.row && a.col === b.col;
+}
+
+function wallMatches(a: WallPlacement, b: WallPlacement): boolean {
+  return a.orientation === b.orientation && a.row === b.row && a.col === b.col;
+}
+
+function hasBlockingWallBetween(from: Cell, to: Cell, walls: WallPlacement[]): boolean {
+  if (from.row === to.row) {
+    const horizontalStep = to.col - from.col;
+    if (Math.abs(horizontalStep) !== 1) {
+      return true;
     }
 
-    const wall = { row, col, orientation };
-    if (isWallPlacementLegal(game, game.currentPlayer, wall)) {
-      const next = submitPlayerAction(game, {
-        player: game.currentPlayer,
-        type: 'wall',
-        wall
-      });
-      setGame(next);
+    const leftCol = Math.min(from.col, to.col);
+    return walls.some((wall) => wall.orientation === 'vertical' && wall.row === from.row && wall.col === leftCol);
+  }
+
+  if (from.col === to.col) {
+    const verticalStep = to.row - from.row;
+    if (Math.abs(verticalStep) !== 1) {
+      return true;
     }
+
+    const topRow = Math.min(from.row, to.row);
+    return walls.some((wall) => wall.orientation === 'horizontal' && wall.row === topRow && wall.col === from.col);
+  }
+
+  return true;
+}
+
+function adjacentCells(cell: Cell): Cell[] {
+  return DIRECTIONS.map((direction) => ({
+    row: cell.row + direction.row,
+    col: cell.col + direction.col
+  })).filter((candidate) => isInsideBoard(candidate));
+}
+
+function legalMovesIgnoringOpponent(position: Cell, walls: WallPlacement[]): Cell[] {
+  return adjacentCells(position).filter((candidate) => !hasBlockingWallBetween(position, candidate, walls));
+}
+
+export function canPlayerReachGoal(state: GameState, playerId: PlayerId): boolean {
+  const start = state.players[playerId].pawn;
+  const goalRow = state.players[playerId].goalRow;
+  const queue: Cell[] = [start];
+  const visited = new Set<string>([`${start.row}:${start.col}`]);
+
+  while (queue.length > 0) {
+    const current = queue.shift() as Cell;
+    if (current.row === goalRow) {
+      return true;
+    }
+
+    for (const move of legalMovesIgnoringOpponent(current, state.walls)) {
+      const key = `${move.row}:${move.col}`;
+      if (!visited.has(key)) {
+        visited.add(key);
+        queue.push(move);
+      }
+    }
+  }
+
+  return false;
+}
+
+function getDirectionalMoveOptions(state: GameState, playerId: PlayerId): Cell[] {
+  const player = state.players[playerId];
+  const opponent = state.players[getOpponent(playerId)];
+  const legalMoves: Cell[] = [];
+
+  for (const direction of DIRECTIONS) {
+    const adjacent = {
+      row: player.pawn.row + direction.row,
+      col: player.pawn.col + direction.col
+    };
+
+    if (!isInsideBoard(adjacent) || hasBlockingWallBetween(player.pawn, adjacent, state.walls)) {
+      continue;
+    }
+
+    const adjacentIsOpponent = isSameCell(adjacent, opponent.pawn);
+    if (!adjacentIsOpponent) {
+      legalMoves.push(adjacent);
+      continue;
+    }
+
+    const beyond = {
+      row: adjacent.row + direction.row,
+      col: adjacent.col + direction.col
+    };
+
+    const straightJumpAvailable = isInsideBoard(beyond) && !hasBlockingWallBetween(adjacent, beyond, state.walls);
+
+    if (straightJumpAvailable) {
+      legalMoves.push(beyond);
+      continue;
+    }
+
+    const diagonals =
+      direction.row === 0
+        ? [
+            { row: -1, col: 0 },
+            { row: 1, col: 0 }
+          ]
+        : [
+            { row: 0, col: -1 },
+            { row: 0, col: 1 }
+          ];
+
+    for (const diagonal of diagonals) {
+      const diagonalTarget = {
+        row: adjacent.row + diagonal.row,
+        col: adjacent.col + diagonal.col
+      };
+
+      if (!isInsideBoard(diagonalTarget)) {
+        continue;
+      }
+
+      if (!hasBlockingWallBetween(adjacent, diagonalTarget, state.walls)) {
+        legalMoves.push(diagonalTarget);
+      }
+    }
+  }
+
+  return legalMoves;
+}
+
+export function getLegalMoves(state: GameState, playerId: PlayerId): Cell[] {
+  const deduplicated = new Map<string, Cell>();
+
+  for (const cell of getDirectionalMoveOptions(state, playerId)) {
+    deduplicated.set(`${cell.row}:${cell.col}`, cell);
+  }
+
+  return Array.from(deduplicated.values());
+}
+
+function wallInBounds(wall: WallPlacement): boolean {
+  return wall.row >= 0 && wall.row < BOARD_SIZE - 1 && wall.col >= 0 && wall.col < BOARD_SIZE - 1;
+}
+
+function wallsIntersect(a: WallPlacement, b: WallPlacement): boolean {
+  if (a.orientation === b.orientation) {
+    return false;
+  }
+
+  const horizontal = a.orientation === 'horizontal' ? a : b;
+  const vertical = a.orientation === 'vertical' ? a : b;
+
+  return horizontal.row === vertical.row && horizontal.col === vertical.col;
+}
+
+export function isWallPlacementLegal(state: GameState, player: PlayerId, wall: WallPlacement): boolean {
+  if (state.status === 'finished') {
+    return false;
+  }
+
+  if (!state.players[player] || !wallInBounds(wall)) {
+    return false;
+  }
+
+  if (state.walls.some((existing) => wallMatches(existing, wall) || wallsIntersect(existing, wall))) {
+    return false;
+  }
+
+  const nextState: GameState = {
+    ...state,
+    walls: [...state.walls, { ...wall }]
   };
 
-  return (
-    <main className="min-h-screen p-6 md:p-10">
-      <div className="mx-auto max-w-6xl">
-        <header className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.3em] text-stone-500">Quoridor Arena</p>
-            <h1 className="text-3xl font-bold text-stone-900">Think Ahead. Block Smart. Reach the Goal.</h1>
-          </div>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              className={`rounded-full border px-4 py-2 text-sm font-semibold ${orientation === 'horizontal' ? 'border-stone-800 bg-stone-900 text-white' : 'border-stone-300 bg-white text-stone-800'}`}
-              onClick={() => setOrientation('horizontal')}
-            >
-              Horizontal wall
-            </button>
-            <button
-              type="button"
-              className={`rounded-full border px-4 py-2 text-sm font-semibold ${orientation === 'vertical' ? 'border-stone-800 bg-stone-900 text-white' : 'border-stone-300 bg-white text-stone-800'}`}
-              onClick={() => setOrientation('vertical')}
-            >
-              Vertical wall
-            </button>
-          </div>
-        </header>
+  return canPlayerReachGoal(nextState, 'player1') && canPlayerReachGoal(nextState, 'player2');
+}
 
-        <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
-          <section className="rounded-[32px] border border-stone-200 bg-[#f8f3ed] p-4 shadow-[0_16px_40px_rgba(73,48,25,0.12)]">
-            <div className="grid grid-cols-9 gap-1 rounded-[24px] bg-[#d39a4b] p-2 shadow-inner">
-              {Array.from({ length: BOARD_SIZE * BOARD_SIZE }).map((_, index) => {
-                const row = Math.floor(index / BOARD_SIZE);
-                const col = index % BOARD_SIZE;
-                const player1 = game.players.player1.pawn;
-                const player2 = game.players.player2.pawn;
+function cloneStateForNextTurn(state: GameState): GameState {
+  return {
+    ...state,
+    players: {
+      player1: {
+        ...state.players.player1,
+        pawn: { ...state.players.player1.pawn }
+      },
+      player2: {
+        ...state.players.player2,
+        pawn: { ...state.players.player2.pawn }
+      }
+    },
+    walls: state.walls.map((wall) => ({ ...wall })),
+    moveHistory: [...state.moveHistory]
+  };
+}
 
-                const isPlayer1 = row === player1.row && col === player1.col;
-                const isPlayer2 = row === player2.row && col === player2.col;
-                const isLegalMove = legalMoves.some((cell) => cell.row === row && cell.col === col);
+export function submitPlayerAction(state: GameState, action: MoveAction): GameState {
+  if (state.status === 'finished') {
+    throw new Error('This game is already finished.');
+  }
 
-                return (
-                  <button
-                    key={`${row}-${col}`}
-                    type="button"
-                    aria-label={`Cell ${row + 1}, ${col + 1}`}
-                    onClick={() => handleCellClick(row, col)}
-                    className={[
-                      'relative flex aspect-square items-center justify-center rounded-md border border-[#b37a2d] text-xs font-semibold',
-                      (row + col) % 2 === 0 ? 'bg-[#e7c18d]' : 'bg-[#d8a765]',
-                      isLegalMove ? 'ring-2 ring-emerald-300 ring-offset-1' : '',
-                      isPlayer1 || isPlayer2 ? 'shadow-inner' : ''
-                    ].join(' ')}
-                  >
-                    {isPlayer1 && (
-                      <span className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-stone-200 bg-[#f7f3ee] text-[10px] font-bold text-stone-900 shadow-md">
-                        P1
-                      </span>
-                    )}
-                    {isPlayer2 && (
-                      <span className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-stone-700 bg-[#1f1a14] text-[10px] font-bold text-stone-100 shadow-md">
-                        P2
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </section>
+  if (action.player !== state.currentPlayer) {
+    throw new Error('It is not this player\'s turn.');
+  }
 
-          <aside className="space-y-4 rounded-[28px] border border-stone-200 bg-white/70 p-5 shadow-md backdrop-blur-sm">
-            <div className="rounded-2xl bg-stone-900 p-4 text-white">
-              <p className="text-xs uppercase tracking-[0.24em] text-stone-300">Current turn</p>
-              <p className="mt-2 text-2xl font-bold">{game.currentPlayer === 'player1' ? 'Player 1' : 'Player 2'}</p>
-            </div>
+  const next = cloneStateForNextTurn(state);
 
-            <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4">
-              <p className="text-xs uppercase tracking-[0.24em] text-stone-500">Status</p>
-              <p className="mt-2 text-lg font-semibold text-stone-900">{game.status === 'finished' ? `Winner: ${game.winner}` : 'In progress'}</p>
-            </div>
+  if (action.type === 'move') {
+    const legalMoves = getLegalMoves(state, action.player);
+    const legal = legalMoves.some((move) => isSameCell(move, action.to));
 
-            <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4">
-              <p className="text-xs uppercase tracking-[0.24em] text-stone-500">Walls remaining</p>
-              <div className="mt-3 flex items-center justify-between text-sm">
-                <span>Player 1</span>
-                <strong>{game.players.player1.wallsRemaining}</strong>
-              </div>
-              <div className="mt-2 flex items-center justify-between text-sm">
-                <span>Player 2</span>
-                <strong>{game.players.player2.wallsRemaining}</strong>
-              </div>
-            </div>
+    if (!legal) {
+      throw new Error('Illegal move submitted.');
+    }
 
-            <button
-              type="button"
-              className="w-full rounded-full bg-emerald-600 px-4 py-3 font-semibold text-white transition hover:bg-emerald-500"
-              onClick={() => setGame(createInitialGameState())}
-            >
-              Reset local board
-            </button>
-          </aside>
-        </div>
-      </div>
-    </main>
-  );
+    const from = { ...next.players[action.player].pawn };
+    next.players[action.player].pawn = { ...action.to };
+    next.moveHistory.push({
+      type: 'move',
+      player: action.player,
+      from,
+      to: { ...action.to }
+    });
+
+    if (action.to.row === next.players[action.player].goalRow) {
+      next.status = 'finished';
+      next.winner = action.player;
+    }
+  }
+
+  if (action.type === 'wall') {
+    const actor = next.players[action.player];
+    if (actor.wallsRemaining <= 0) {
+      throw new Error('Player has no walls remaining.');
+    }
+
+    if (!isWallPlacementLegal(state, action.player, action.wall)) {
+      throw new Error('Wall placement is illegal.');
+    }
+
+    actor.wallsRemaining -= 1;
+    next.walls.push({ ...action.wall });
+    next.moveHistory.push({
+      type: 'wall',
+      player: action.player,
+      wall: { ...action.wall }
+    });
+  }
+
+  if (action.type === 'resign') {
+    next.status = 'finished';
+    next.winner = getOpponent(action.player);
+    next.moveHistory.push({ type: 'resign', player: action.player });
+  }
+
+  next.version = state.version + 1;
+  next.turnNumber = state.turnNumber + 1;
+
+  if (next.status === 'playing') {
+    next.currentPlayer = getOpponent(action.player);
+  }
+
+  return next;
 }
