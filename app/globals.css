@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #f3efe8;
+  --foreground: #20170f;
+  --board: #d2a25b;
+  --board-dark: #9f6c2d;
+  --board-light: #e8c17d;
+  --pawn-white: #f8f5f1;
+  --pawn-black: #1f1a14;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: linear-gradient(180deg, #f5f0e9 0%, #efe4d5 100%);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
